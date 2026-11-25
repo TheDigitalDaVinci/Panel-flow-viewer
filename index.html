@@ -46,9 +46,23 @@
   const n36 = s => parseInt(s, 36) || 0;
   const fmt = v => (Math.round(v * 10) / 10).toString();
 
-  /* ---------- decode the label link (format v1, see PanelFlow exports.js) ---------- */
+  /* ---------- decode the label link (formats v2 and v1, see PanelFlow exports.js) ---------- */
   function parse(hash) {
     const f = hash.replace(/^#/, '').split('~');
+    if (f[0] === '2' && f.length >= 10) {
+      const t = f[9].split(':');
+      const [W, H, D] = t[0].split('.').map(n36), [L, Wp, T] = t[1].split('.').map(v => n36(v) / 10);
+      const [wall, x] = dec(f[4]).split('@');
+      const raw = (t[4] || '').split('*').filter(Boolean);
+      const boxes = raw.map((s, i) => {
+        if (s === 'N') return null;
+        const m = i === 0 ? 0.1 : 10, v = s.slice(1).split('.').map(n36);
+        return { k: s[0].toLowerCase(), x: v[0] * m, y: v[1] * m, d: v[2] * m, w: v[3] * m, h: v[4] * m, dd: v[5] * m, rot: v[6] || 0 };
+      });
+      const sel = boxes[0] ? 0 : -1;
+      return { project: dec(f[1]), label: dec(f[2]), cabName: dec(f[3]), wall, wallX: x, W, H, D, id: dec(f[5]), code: dec(f[6]), name: dec(f[7]),
+        L, Wp, T, mat: dec(f[8]), eb: (t[2] || '').split('.').map(v => n36(v) / 10), piece: t[3] || '', boxes: boxes.filter(Boolean), sel };
+    }
     if (f[0] !== '1' || f.length < 15) return null;
     const [W, H, D] = f[5].split('.').map(n36);
     const [L, Wp, T] = f[9].split('x').map(Number);
