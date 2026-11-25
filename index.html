@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1f2937">
+<title>PanelFlow part viewer</title>
+<!-- PanelFlow site viewer: shows the cabinet with the scanned part highlighted.
+     Everything it draws comes from the link's #fragment (written by the part label QR); no data is stored on any server.
+     Host this one file (plus sw.js) anywhere: GitHub Pages, Netlify, your website. -->
+<style>
+  :root { --bg: #f3f4f6; --card: #fff; --ink: #111827; --mut: #6b7280; --line: #e5e7eb; --hi: #f59e0b; --hiD: #b45309; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  header { background: #1f2937; color: #fff; padding: 12px 16px; display: flex; align-items: baseline; gap: 10px; }
+  header b { font-size: 26px; color: var(--hi); letter-spacing: .5px; }
+  header span { font-size: 17px; font-weight: 600; }
+  main { padding: 12px 16px 24px; max-width: 900px; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; margin-bottom: 12px; }
+  .size { font-size: 28px; font-weight: 800; }
+  .size small { font-size: 16px; color: var(--mut); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 4px; }
+  .row div { min-width: 120px; } .row i { display: block; font-style: normal; font-size: 12px; color: var(--mut); text-transform: uppercase; letter-spacing: .5px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .seg button { flex: 1 1 auto; min-height: 42px; padding: 8px 10px; border: 1px solid #cbd5e1; background: #fff; border-radius: 10px; font-size: 15px; font-weight: 600; color: var(--ink); }
+  .seg button.on { background: #1f2937; color: #fff; border-color: #1f2937; }
+  #view { width: 100%; height: auto; aspect-ratio: 10 / 7; display: block; background: #fff; border-radius: 10px; border: 1px solid var(--line); touch-action: manipulation; }
+  .legend { display: flex; gap: 14px; font-size: 13px; color: var(--mut); margin-top: 6px; flex-wrap: wrap; }
+  .legend span::before { content: ''; display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; vertical-align: -1px; background: var(--c); border: 1px solid #0003; }
+  .eb { display: grid; grid-template-columns: 1fr 2fr 1fr; grid-template-rows: auto auto auto; align-items: center; justify-items: center; gap: 4px; max-width: 320px; margin-top: 6px; font-size: 13px; }
+  .eb .p { grid-column: 2; grid-row: 2; width: 100%; height: 54px; border: 1px solid #94a3b8; background: #f8fafc; display: flex; align-items: center; justify-content: center; color: var(--mut); font-size: 12px; position: relative; }
+  .eb b { font-size: 14px; }
+  .empty { text-align: center; padding: 40px 16px; color: var(--mut); }
+  svg text { font-family: system-ui, Arial, sans-serif; }
+</style>
+</head>
+<body>
+<header><b id="hCode">PanelFlow</b><span id="hName">Part viewer</span></header>
+<main id="app"><div class="empty">Scan the QR code on a PanelFlow part label to see where the part goes.</div></main>
+<script>
+'use strict';
+(function () {
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const dec = s => { const t = String(s || '').replace(/\+/g, ' '); try { return decodeURIComponent(t); } catch (e) { return t; } };
+  const n36 = s => parseInt(s, 36) || 0;
+  const fmt = v => (Math.round(v * 10) / 10).toString();
+
+  /* ---------- decode the label link (format v1, see PanelFlow exports.js) ---------- */
+  function parse(hash) {
+    const f = hash.replace(/^#/, '').split('~');
+    if (f[0] !== '1' || f.length < 15) return null;
+    const [W, H, D] = f[5].split('.').map(n36);
+    const [L, Wp, T] = f[9].split('x').map(Number);
+    const [wall, x] = dec(f[4]).split('@');
+    const boxes = (f[13] || '').split('_').filter(Boolean).map(s => {
+      const up = s[0] !== s[0].toLowerCase(), m = up ? 5 : 0.1, k = s[0].toLowerCase(), v = s.slice(1).split('.').map(n36);
+      return { k, x: v[0] * m, y: v[1] * m, d: v[2] * m, w: v[3] * m, h: v[4] * m, dd: v[5] * m, rot: v[6] || 0 };
+    });
+    return { project: dec(f[1]), label: dec(f[2]), cabName: dec(f[3]), wall, wallX: x, W, H, D, id: dec(f[6]), code: dec(f[7]), name: dec(f[8]),
+      L, Wp, T, mat: dec(f[10]), eb: f[11].split(',').map(Number), piece: f[12], boxes, sel: parseInt(f[14], 10) };
+  }
+
+  /* bounding box of a (possibly turned) box */
+  function bb(b) {
+    if (!b.rot) return { x0: b.x, x1: b.x + b.w, y0: b.y, y1: b.y + b.h, d0: b.d, d1: b.d + b.dd };
+    const a = b.rot * Math.PI / 180, cx = b.x + b.w / 2, cd = b.d + b.dd / 2;
+    const ex = Math.abs(Math.cos(a)) * b.w / 2 + Math.abs(Math.sin(a)) * b.dd / 2, ed = Math.abs(Math.sin(a)) * b.w / 2 + Math.abs(Math.cos(a)) * b.dd / 2;
+    return { x0: cx - ex, x1: cx + ex, y0: b.y, y1: b.y + b.h, d0: cd - ed, d1: cd + ed };
+  }
+  /* turn the whole cabinet by quarter turns (seen from above, clockwise: the right side comes to the front) */
+  function turn(q, W, D, k) {
+    let r = Object.assign({}, q), w = W, dd = D;
+    for (let i = 0; i < k; i++) { r = { x0: r.d0, x1: r.d1, y0: r.y0, y1: r.y1, d0: w - r.x1, d1: w - r.x0 }; const t = w; w = dd; dd = t; }
+    return r;
+  }
+
+  const FILL = { c: '#e8d9bd', s: '#9db8d0', b: '#cbb791', d: '#efe4cc' };
+  const STROKE = { c: '#6b5435', s: '#2b5d8a', b: '#6b5435', d: '#8b7355' };
+
+  function draw(data, mode, k, see) {
+    const svgW = 1000, svgH = 700, pad = 70;
+    const sel = data.boxes[data.sel];
+    let items = data.boxes.map((b, i) => ({ b, i, q: bb(b) }));
+    const ext = items.reduce((m, it) => ({ x0: Math.min(m.x0, it.q.x0), x1: Math.max(m.x1, it.q.x1), y0: Math.min(m.y0, it.q.y0), y1: Math.max(m.y1, it.q.y1), d0: Math.min(m.d0, it.q.d0), d1: Math.max(m.d1, it.q.d1) }), { x0: 0, x1: data.W, y0: 0, y1: data.H, d0: 0, d1: data.D });
+    items.forEach(it => { it.q = { x0: it.q.x0 - ext.x0, x1: it.q.x1 - ext.x0, y0: it.q.y0, y1: it.q.y1, d0: it.q.d0 - ext.d0, d1: it.q.d1 - ext.d0 }; });
+    let W = ext.x1 - ext.x0, D = ext.d1 - ext.d0; const H = ext.y1;
+    if (mode === '3d' && k) { items.forEach(it => { it.q = turn(it.q, W, D, k); }); if (k % 2) { const t = W; W = D; D = t; } }
+    const polys = [], texts = [];
+    let P, sc, ox, oy, bounds;
+    if (mode === '3d') {
+      const kx = 0.45, ky = 0.32;   // oblique: depth recedes up and to the right
+      P = (x, y, d) => [x + d * kx, y + d * ky];
+      bounds = { u0: 0, u1: W + D * kx, v0: Math.min(0, ext.y0), v1: H + D * ky };
+    } else if (mode === 'front') { P = (x, y) => [x, y]; bounds = { u0: 0, u1: W, v0: Math.min(0, ext.y0), v1: H }; }
+    else if (mode === 'side') { P = (x, y, d) => [d, y]; bounds = { u0: 0, u1: D, v0: Math.min(0, ext.y0), v1: H }; }
+    else { P = (x, y, d) => [x, D - d]; bounds = { u0: 0, u1: W, v0: 0, v1: D }; }
+    sc = Math.min((svgW - 2 * pad) / Math.max(1, bounds.u1 - bounds.u0), (svgH - 2 * pad) / Math.max(1, bounds.v1 - bounds.v0));
+    ox = pad + ((svgW - 2 * pad) - (bounds.u1 - bounds.u0) * sc) / 2 - bounds.u0 * sc;
+    oy = svgH - pad - ((svgH - 2 * pad) - (bounds.v1 - bounds.v0) * sc) / 2 + bounds.v0 * sc;
+    const S = ([u, v]) => [ox + u * sc, oy - v * sc];
+    const pt = a => a.map(p => S(p).map(n => n.toFixed(1)).join(',')).join(' ');
+    const near = q => mode === '3d' ? (q.x0 + q.x1) * 0.25 + (q.y0 + q.y1) * 0.2 - (q.d0 + q.d1) * 0.6
+      : mode === 'front' ? -q.d0 : mode === 'side' ? q.x1 : q.y1;
+    items.sort((a, c) => (a.i === data.sel) - (c.i === data.sel) || near(a.q) - near(c.q));
+    items.forEach(it => {
+      const q = it.q, hi = it.i === data.sel, k0 = it.b.k;
+      const fill = hi ? '#f59e0b' : FILL[k0] || '#ddd', st = hi ? '#92400e' : STROKE[k0] || '#555';
+      const op = hi ? 1 : see ? (k0 === 's' ? 0.15 : 0.5) : (k0 === 's' ? 0.4 : 0.95);
+      const sw = hi ? 3 : 1;
+      if (mode === '3d') {
+        const f = [[q.x0, q.y0, q.d0], [q.x1, q.y0, q.d0], [q.x1, q.y1, q.d0], [q.x0, q.y1, q.d0]].map(a => P(...a));
+        const t = [[q.x0, q.y1, q.d0], [q.x1, q.y1, q.d0], [q.x1, q.y1, q.d1], [q.x0, q.y1, q.d1]].map(a => P(...a));
+        const r = [[q.x1, q.y0, q.d0], [q.x1, q.y0, q.d1], [q.x1, q.y1, q.d1], [q.x1, q.y1, q.d0]].map(a => P(...a));
+        polys.push(`<g opacity="${op}"><polygon points="${pt(r)}" fill="${fill}" stroke="${st}" stroke-width="${sw}" style="filter:brightness(.82)"/><polygon points="${pt(t)}" fill="${fill}" stroke="${st}" stroke-width="${sw}" style="filter:brightness(1.08)"/><polygon points="${pt(f)}" fill="${fill}" stroke="${st}" stroke-width="${sw}"/></g>`);
+      } else {
+        const a = P(q.x0, q.y0, q.d0), b = P(q.x1, q.y1, q.d1);
+        const u0 = Math.min(a[0], b[0]), u1 = Math.max(a[0], b[0]), v0 = Math.min(a[1], b[1]), v1 = Math.max(a[1], b[1]);
+        polys.push(`<polygon opacity="${op}" points="${pt([[u0, v0], [u1, v0], [u1, v1], [u0, v1]])}" fill="${fill}" stroke="${st}" stroke-width="${sw}"/>`);
+        if (hi) {
+          // where the part sits: distance from the left / bottom (front, side) or from the left / front (top)
+          const dim = (x1, y1, x2, y2, txt, vert) => {
+            const A = S([x1, y1]), B = S([x2, y2]);
+            texts.push(`<line x1="${A[0]}" y1="${A[1]}" x2="${B[0]}" y2="${B[1]}" stroke="#b45309" stroke-width="2" marker-start="url(#ar)" marker-end="url(#ar)"/>`);
+            const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+            texts.push(`<text x="${vert ? mx - 8 : Math.min(A[0], B[0]) + 4}" y="${my + (vert ? 0 : -8)}" font-size="22" font-weight="700" fill="#92400e" text-anchor="${vert ? 'middle' : 'start'}"${vert ? ` transform="rotate(-90 ${mx - 8} ${my})"` : ''}>${esc(txt)}</text>`);
+          };
+          const sz = (u1 - u0), szv = (v1 - v0);
+          if (u0 > 1) dim(0, v0 + szv / 2, u0, v0 + szv / 2, fmt(u0) + ' from ' + (mode === 'side' ? 'front' : 'left'));
+          if (v0 > 1) dim(u0 + sz / 2, 0, u0 + sz / 2, v0, fmt(v0) + (mode === 'top' ? ' from back' : ' up'), true);
+        }
+      }
+    });
+    // overall size
+    const ow = mode === 'side' ? D : W, oh = mode === 'top' ? D : H;
+    const lab = [];
+    if (mode !== '3d') {
+      const a = S([0, bounds.v0]), b = S([ow, bounds.v0]), c = S([ow, 0]), d = S([ow, oh]);
+      lab.push(`<line x1="${a[0]}" y1="${a[1] + 30}" x2="${b[0]}" y2="${b[1] + 30}" stroke="#64748b" marker-start="url(#ar2)" marker-end="url(#ar2)"/><text x="${(a[0] + b[0]) / 2}" y="${a[1] + 56}" font-size="22" fill="#334155" text-anchor="middle">${fmt(ow)}</text>`);
+      lab.push(`<line x1="${c[0] + 30}" y1="${c[1]}" x2="${d[0] + 30}" y2="${d[1]}" stroke="#64748b" marker-start="url(#ar2)" marker-end="url(#ar2)"/><text x="${c[0] + 56}" y="${(c[1] + d[1]) / 2}" font-size="22" fill="#334155" text-anchor="middle" transform="rotate(-90 ${c[0] + 56} ${(c[1] + d[1]) / 2})">${fmt(oh)}</text>`);
+    }
+    const title = { '3d': ['FRONT', 'RIGHT SIDE', 'BACK', 'LEFT SIDE'][k % 4] + ' in front', front: 'FRONT VIEW', side: 'RIGHT SIDE VIEW (front on the left)', top: 'TOP VIEW (front at the bottom)' }[mode];
+    return `<svg id="view" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg"><defs>
+      <marker id="ar" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#b45309"/></marker>
+      <marker id="ar2" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#64748b"/></marker></defs>
+      <text x="20" y="34" font-size="24" font-weight="700" fill="#374151">${esc(title)}</text>${polys.join('')}${texts.join('')}${lab.join('')}${sel ? '' : '<text x="500" y="680" font-size="20" fill="#b91c1c" text-anchor="middle">This part has no position in the drawing</text>'}</svg>`;
+  }
+
+  function render() {
+    const data = parse(location.hash);
+    if (!data) { $('#hCode').textContent = 'PanelFlow'; $('#hName').textContent = 'Part viewer'; $('#app').innerHTML = '<div class="empty">Scan the QR code on a PanelFlow part label to see where the part goes.</div>'; return; }
+    document.title = `${data.code} ${data.name} – ${data.label}`;
+    $('#hCode').textContent = data.code; $('#hName').textContent = data.name;
+    const st = { mode: '3d', k: 0, see: true };
+    const e = data.eb, ebTxt = v => (v ? v + ' mm' : 'none');
+    $('#app').innerHTML = `
+      <div class="card"><div class="size">${fmt(data.L)} × ${fmt(data.Wp)} <small>× ${fmt(data.T)} mm</small></div>
+        <div class="row"><div><i>Material</i>${esc(data.mat)}</div><div><i>Piece</i>${esc(data.piece)}</div><div><i>Part no.</i>${esc(data.id)}</div></div></div>
+      <div class="card"><div class="seg" id="mode"><button data-m="3d" class="on">3D</button><button data-m="front">Front</button><button data-m="side">Side</button><button data-m="top">Top</button></div>
+        <div class="seg" id="tools"><button id="turn">⟳ Turn box</button><button id="see" class="on">See-through</button></div>
+        <div id="wrap"></div>
+        <div class="legend"><span style="--c:#f59e0b">This part</span><span style="--c:#e8d9bd">Carcass</span><span style="--c:#9db8d0">Shutters</span><span style="--c:#cbb791">Back</span></div></div>
+      <div class="card"><div class="row"><div><i>Cabinet</i><b>${esc(data.label)}</b> – ${esc(data.cabName)}</div><div><i>Box size</i>${fmt(data.W)} × ${fmt(data.H)} × ${fmt(data.D)}</div>
+        <div><i>Location</i>${esc(data.wall || '-')}${data.wallX ? ', ' + esc(data.wallX) + ' mm from wall start' : ''}</div><div><i>Project</i>${esc(data.project)}</div></div></div>
+      <div class="card"><i style="font-style:normal;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:.5px">Edge band</i>
+        <div class="eb"><b style="grid-column:2;grid-row:1">L2 ${ebTxt(e[1])}</b><b style="grid-column:1;grid-row:2">W1 ${ebTxt(e[2])}</b><div class="p">${fmt(data.L)} long side ↔</div><b style="grid-column:3;grid-row:2">W2 ${ebTxt(e[3])}</b><b style="grid-column:2;grid-row:3">L1 ${ebTxt(e[0])} (front)</b></div></div>`;
+    const paint = () => { $('#wrap').innerHTML = draw(data, st.mode, st.k, st.see); $('#tools').style.display = st.mode === '3d' ? '' : 'none'; };
+    document.querySelectorAll('#mode button').forEach(b => b.onclick = () => { st.mode = b.dataset.m; document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('on', x === b)); paint(); });
+    $('#turn').onclick = () => { st.k = (st.k + 1) % 4; paint(); };
+    $('#see').onclick = () => { st.see = !st.see; $('#see').classList.toggle('on', st.see); paint(); };
+    paint();
+  }
+  window.addEventListener('hashchange', render);
+  render();
+  // keep the page on the phone so it opens without signal next time
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || /^(localhost|127\.0\.0\.1)$/.test(location.hostname))) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script>
+</body>
+</html>
